@@ -1,13 +1,11 @@
 import argparse
 import torch
 from pathlib import Path
+from dataclasses import fields
 from transformers import AutoTokenizer
 
 from llm_lab import TritonMindConfig, TritonMindForCausalLM
 from llm_lab.utils.logger import setup_logger, get_logger
-import llm_lab
-
-TOKENIZER_DIR = Path(llm_lab.__file__).resolve().parent
 
 
 def main():
@@ -21,7 +19,7 @@ def main():
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=50,
+        default=500,
         help="最大生成 token 数",
     )
     parser.add_argument(
@@ -29,6 +27,12 @@ def main():
         type=str,
         default="INFO",
         help="日志级别",
+    )
+    parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default="./configs/model",
+        help="tokenizer 目录路径",
     )
     args = parser.parse_args()
     
@@ -39,12 +43,18 @@ def main():
     checkpoint_path = args.checkpoint_path
     logger.info(f"加载 checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    config = TritonMindConfig(**checkpoint["config"])
+    
+    # 从 checkpoint 中提取只属于 TritonMindConfig 的字段（向后兼容旧版本 checkpoint）
+    checkpoint_config = checkpoint["config"]
+    config_fields = {f.name for f in fields(TritonMindConfig)}
+    config_dict = {k: v for k, v in checkpoint_config.items() if k in config_fields}
+    config = TritonMindConfig(**config_dict)
     model = TritonMindForCausalLM(config)
     model = model.to(config.device)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(str(TOKENIZER_DIR))
+    tokenizer_path = Path(args.tokenizer_path).resolve()
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
     logger.info("模型加载完成，开始推理")
 
     while True:

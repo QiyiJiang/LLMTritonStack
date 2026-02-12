@@ -5,14 +5,12 @@ import math
 import torch.nn.functional as F
 from pathlib import Path
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import GradScaler
 from transformers import AutoTokenizer
 
 import llm_lab
 from llm_lab import TritonMindConfig, TritonMindForCausalLM, SimplePretrainDataset
 from llm_lab.utils.logger import setup_logger, get_logger
-
-TOKENIZER_DIR = Path(llm_lab.__file__).resolve().parent
 
 
 def get_lr(current_step, total_steps, lr):
@@ -37,6 +35,7 @@ def main():
     
     # 训练参数
     parser.add_argument("--data_path", type=str, required=True, help="预训练数据文件路径")
+    parser.add_argument("--tokenizer_path", type=str, default="./configs/model", help="tokenizer 目录路径")
     parser.add_argument("--checkpoints_dir", type=str, default="checkpoints", help="Checkpoint 保存目录")
     parser.add_argument("--epochs", type=int, default=3, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
@@ -93,7 +92,7 @@ def main():
     
     # 训练设置
     use_amp = torch.cuda.is_available() and not args.no_amp
-    scaler = GradScaler() if use_amp else None
+    scaler = GradScaler('cuda') if use_amp else None
     torch.manual_seed(42)
     
     # 创建模型
@@ -102,7 +101,8 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     
     # 准备数据
-    tokenizer = AutoTokenizer.from_pretrained(str(TOKENIZER_DIR))
+    tokenizer_path = Path(args.tokenizer_path).resolve()
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_path))
     dataset = SimplePretrainDataset(args.data_path, tokenizer=tokenizer, max_length=config.train_max_length)
     loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=4, shuffle=True)
     
@@ -127,7 +127,7 @@ def main():
                 param_group['lr'] = lr
             
             if use_amp:
-                with autocast():
+                with torch.amp.autocast('cuda'):
                     logits = model(input_ids)
                     logits_slice = logits[:, :-1, :].reshape(-1, config.vocab_size)
                     labels_slice = labels[:, 1:].reshape(-1)

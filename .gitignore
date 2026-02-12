@@ -115,7 +115,7 @@ venv.bak/
 
 # uv
 .uv/
-uv.lock
+# uv.lock  # 应该提交，确保依赖版本一致性
 
 # Spyder project settings
 .spyderproject
