@@ -1,161 +1,135 @@
-"""日志模块：提供统一的日志记录功能，支持从 .env 文件加载配置。"""
-import logging
+"""日志模块：基于 loguru 提供统一的日志记录功能。"""
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from loguru import logger
 
 
-def load_env_file(env_path: Optional[Path] = None) -> dict:
+def _get_default_log_file(name: str = "llm_lab") -> Path:
     """
-    从 .env 文件加载环境变量（简单实现，不依赖 python-dotenv）。
+    获取默认日志文件路径：项目根目录下的 logs/ 文件夹，文件名包含时间戳。
     
     Args:
-        env_path: .env 文件路径，默认查找 llm_study/.env
+        name: logger 名称，用于生成日志文件名
     
     Returns:
-        环境变量字典
+        日志文件路径
     """
-    if env_path is None:
-        # 默认查找 llm_study/.env
-        env_path = Path(__file__).parent / ".env"
+    # 获取项目根目录（假设 logger.py 在 src/llm_lab/utils/ 下）
+    # 从当前文件向上找到项目根目录
+    current_file = Path(__file__).resolve()
+    # src/llm_lab/utils/logger.py -> 项目根目录
+    project_root = current_file.parent.parent.parent.parent
     
-    env_vars = {}
-    if env_path.exists():
-        with open(env_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                # 跳过空行和注释
-                if not line or line.startswith("#"):
-                    continue
-                # 解析 KEY=VALUE
-                if "=" in line:
-                    key, value = line.split("=", 1)
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    env_vars[key] = value
+    # 创建 logs 目录
+    logs_dir = project_root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
     
-    return env_vars
+    # 生成带时间戳的文件名
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f"{name}_{timestamp}.log"
+    
+    return logs_dir / log_filename
 
 
 def setup_logger(
-    name: str = "llm_study",
-    level: Optional[str] = None,
+    name: str = "llm_lab",
+    level: str = "INFO",
     log_file: Optional[Path] = None,
+    auto_log_file: bool = True,
+    rotation: str = "10 MB",
+    retention: str = "7 days",
     format_string: Optional[str] = None,
-    env_path: Optional[Path] = None,
-) -> logging.Logger:
+) -> None:
     """
-    设置并返回 logger 实例。
+    设置 loguru logger 配置。
     
     Args:
-        name: logger 名称，默认 "llm_study"
-        level: 日志级别（DEBUG, INFO, WARNING, ERROR, CRITICAL），默认从 .env 读取或 INFO
-        log_file: 日志文件路径，如果提供则同时输出到文件和控制台
-        format_string: 日志格式字符串，默认包含时间、级别、名称、消息
-        env_path: .env 文件路径
-    
-    Returns:
-        配置好的 logger 实例
+        name: logger 名称（用于日志格式和默认文件名）
+        level: 日志级别（DEBUG, INFO, WARNING, ERROR, CRITICAL）
+        log_file: 日志文件路径，如果为 None 且 auto_log_file=True，则自动创建
+        auto_log_file: 如果为 True 且 log_file 为 None，则自动在项目根目录 logs/ 下创建日志文件
+        rotation: 日志文件轮转大小（如 "10 MB", "1 day"）
+        retention: 日志文件保留时间（如 "7 days", "1 month"）
+        format_string: 自定义日志格式字符串
     """
-    # 加载环境变量
-    env_vars = load_env_file(env_path)
+    # 移除默认的 handler
+    logger.remove()
     
-    # 确定日志级别
-    if level is None:
-        level = env_vars.get("LOG_LEVEL", "INFO").upper()
-    
-    log_level = getattr(logging, level, logging.INFO)
-    
-    # 确定日志文件路径
-    if log_file is None and "LOG_FILE" in env_vars:
-        log_file = Path(env_vars["LOG_FILE"])
-    
-    # 确定日志格式
+    # 设置日志格式
     if format_string is None:
-        format_string = env_vars.get(
-            "LOG_FORMAT",
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        format_string = (
+            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
+            "<level>{message}</level>"
         )
     
-    # 创建 logger
-    logger = logging.getLogger(name)
-    logger.setLevel(log_level)
+    # 添加控制台输出
+    logger.add(
+        sys.stdout,
+        format=format_string,
+        level=level,
+        colorize=True,
+    )
     
-    # 避免重复添加 handler
-    if logger.handlers:
-        return logger
+    # 确定日志文件路径
+    if log_file is None and auto_log_file:
+        log_file = _get_default_log_file(name)
     
-    # 创建 formatter
-    formatter = logging.Formatter(format_string, datefmt="%Y-%m-%d %H:%M:%S")
-    
-    # 控制台 handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(log_level)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    
-    # 文件 handler（如果指定）
+    # 添加文件输出（如果指定）
     if log_file:
-        # 在文件名中添加时间戳
         log_file = Path(log_file)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # 分离文件名和扩展名，插入时间戳
-        stem = log_file.stem  # 文件名（不含扩展名）
-        suffix = log_file.suffix  # 扩展名（如 .log）
-        log_file_with_timestamp = log_file.parent / f"{stem}_{timestamp}{suffix}"
-        
-        log_file_with_timestamp.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file_with_timestamp, encoding="utf-8")
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            str(log_file),
+            format=format_string,
+            level=level,
+            rotation=rotation,
+            retention=retention,
+            encoding="utf-8",
+            enqueue=True,  # 异步写入，提高性能
+        )
+        logger.info(f"日志文件: {log_file}")
+
+
+def get_logger(name: Optional[str] = None) -> "logger":
+    """
+    获取 logger 实例。
     
+    Args:
+        name: logger 名称（可选，主要用于标识）
+    
+    Returns:
+        loguru logger 实例
+    """
+    if name:
+        return logger.bind(name=name)
     return logger
 
 
-# 默认 logger 实例
-_default_logger: Optional[logging.Logger] = None
-
-
-def get_logger(name: str = "llm_study", **kwargs) -> logging.Logger:
-    """
-    获取 logger 实例（单例模式）。
-    
-    Args:
-        name: logger 名称
-        **kwargs: 传递给 setup_logger 的其他参数
-    
-    Returns:
-        logger 实例
-    """
-    global _default_logger
-    if _default_logger is None:
-        _default_logger = setup_logger(name, **kwargs)
-    return _default_logger
-
-
-# 便捷函数
+# 便捷函数（保持向后兼容）
 def debug(msg: str, *args, **kwargs):
     """记录 DEBUG 级别日志。"""
-    get_logger().debug(msg, *args, **kwargs)
+    logger.debug(msg, *args, **kwargs)
 
 
 def info(msg: str, *args, **kwargs):
     """记录 INFO 级别日志。"""
-    get_logger().info(msg, *args, **kwargs)
+    logger.info(msg, *args, **kwargs)
 
 
 def warning(msg: str, *args, **kwargs):
     """记录 WARNING 级别日志。"""
-    get_logger().warning(msg, *args, **kwargs)
+    logger.warning(msg, *args, **kwargs)
 
 
 def error(msg: str, *args, **kwargs):
     """记录 ERROR 级别日志。"""
-    get_logger().error(msg, *args, **kwargs)
+    logger.error(msg, *args, **kwargs)
 
 
 def critical(msg: str, *args, **kwargs):
     """记录 CRITICAL 级别日志。"""
-    get_logger().critical(msg, *args, **kwargs)
+    logger.critical(msg, *args, **kwargs)

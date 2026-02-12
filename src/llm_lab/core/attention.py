@@ -4,6 +4,9 @@ from torch import nn
 import torch.nn.functional as F
 from typing import Optional, Tuple, Dict
 from ..config import TritonMindConfig
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -69,13 +72,13 @@ class MaskedAttention(nn.Module):
 
         scores = torch.matmul(q, k.transpose(-2, -1))
         scores = scores / math.sqrt(self.hidden_size)
-        print("scores:", scores)
-        print("scores shape:", scores.shape)
+        logger.debug(f"scores: {scores}")
+        logger.debug(f"scores shape: {scores.shape}")
 
         mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1)
         scores = scores.masked_fill(mask == 1, float("-inf"))
-        print("scores:", scores)
-        print("scores shape:", scores.shape)
+        logger.debug(f"scores (after mask): {scores}")
+        logger.debug(f"scores shape: {scores.shape}")
 
         att = self._softmax(scores, dim=-1)
 

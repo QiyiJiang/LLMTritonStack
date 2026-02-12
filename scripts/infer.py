@@ -5,6 +5,7 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 from llm_lab import TritonMindConfig, TritonMindForCausalLM
+from llm_lab.utils.logger import setup_logger, get_logger
 import llm_lab
 
 TOKENIZER_DIR = Path(llm_lab.__file__).resolve().parent
@@ -15,11 +16,29 @@ def main():
     parser.add_argument(
         "--checkpoint_path",
         type=str,
-        default="checkpoints/diy_checkpoint.pth",
+        default="checkpoints/TritonMind_checkpoint.pth",
+        help="模型 checkpoint 路径",
+    )
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=50,
+        help="最大生成 token 数",
+    )
+    parser.add_argument(
+        "--log_level",
+        type=str,
+        default="INFO",
+        help="日志级别",
     )
     args = parser.parse_args()
+    
+    # 设置 logger
+    setup_logger(name="llm_lab.infer", level=args.log_level, auto_log_file=True)
+    logger = get_logger("llm_lab.infer")
 
     checkpoint_path = args.checkpoint_path
+    logger.info(f"加载 checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     config = TritonMindConfig(**checkpoint["config"])
     model = TritonMindForCausalLM(config)
@@ -27,8 +46,7 @@ def main():
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(str(TOKENIZER_DIR))
-
-    max_new_tokens = 50  # 最大生成 token 数
+    logger.info("模型加载完成，开始推理")
 
     while True:
         prompt_text = input("Enter a prompt (回车退出): ")
@@ -45,7 +63,7 @@ def main():
         generated_ids = torch.cat([prompt_ids, next_token.unsqueeze(1)], dim=1)
 
         # 循环生成后续 token（使用 KV cache）
-        for _ in range(max_new_tokens - 1):
+        for _ in range(args.max_new_tokens - 1):
             # 只送最后一个 token，用 KV cache
             new_token = next_token.unsqueeze(1)
             logits, presents = model(new_token, past_key_values=presents, use_cache=True)
@@ -56,10 +74,10 @@ def main():
             if tokenizer.eos_token_id is not None and next_token.item() == tokenizer.eos_token_id:
                 break
 
-        # 解码并打印
+        # 解码并输出
         generated_text = tokenizer.decode(generated_ids.squeeze(0).tolist(), skip_special_tokens=True)
-        print(f"Generated: {generated_text}")
-        print("--------------------------------")
+        logger.info(f"Generated: {generated_text}")
+        logger.info("--------------------------------")
 
 if __name__ == "__main__":
     main()

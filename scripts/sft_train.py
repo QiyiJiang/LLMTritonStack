@@ -1,4 +1,4 @@
-"""SFT 示例：SimpleSFTDataset 训练并保存 checkpoint。"""
+"""SFT 训练脚本：接受命令行参数，创建配置并训练模型。"""
 import argparse
 import time
 import torch
@@ -9,46 +9,82 @@ from torch.cuda.amp import autocast, GradScaler
 from transformers import AutoTokenizer
 
 import llm_lab
-from llm_lab import TritonMindConfig, TritonMindForCausalLM, SimpleSFTDataset, get_logger
+from llm_lab import TritonMindConfig, TritonMindForCausalLM, SimpleSFTDataset
+from llm_lab.utils.logger import setup_logger, get_logger
 
 TOKENIZER_DIR = Path(llm_lab.__file__).resolve().parent
 
 
 def main():
-    logger = get_logger("llm_lab.sft")
-    config = TritonMindConfig()
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default=config.default_sft_data_path)
-    parser.add_argument("--checkpoints_dir", type=str, default=config.default_checkpoints_dir)
+    parser = argparse.ArgumentParser(description="TritonMind SFT Training")
+    
+    # 模型结构参数
+    parser.add_argument("--vocab_size", type=int, default=6400, help="词汇表大小")
+    parser.add_argument("--hidden_size", type=int, default=512, help="隐藏层维度")
+    parser.add_argument("--num_layers", type=int, default=8, help="Transformer 层数")
+    parser.add_argument("--num_heads", type=int, default=8, help="注意力头数")
+    parser.add_argument("--num_key_value_heads", type=int, default=2, help="KV 注意力头数（用于 GQA）")
+    parser.add_argument("--max_seq_len", type=int, default=2048, help="最大序列长度")
+    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout 比率")
+    parser.add_argument("--eps", type=float, default=1e-5, help="RMSNorm epsilon")
+    parser.add_argument("--rope_base", type=float, default=1e6, help="RoPE base")
+    parser.add_argument("--train_max_length", type=int, default=340, help="训练时最大序列长度")
+    
+    # 训练参数
+    parser.add_argument("--data_path", type=str, required=True, help="SFT 数据文件路径")
+    parser.add_argument("--checkpoints_dir", type=str, default="checkpoints", help="Checkpoint 保存目录")
+    parser.add_argument("--from_checkpoint", type=str, required=True, help="预训练 checkpoint 路径（必需）")
     parser.add_argument("--epochs", type=int, default=3, help="训练轮数")
-    parser.add_argument("--batch_size", type=int, default=config.default_batch_size, help="batch size")
-    parser.add_argument("--learning_rate", type=float, default=config.default_lr, help="初始学习率")
-    parser.add_argument("--accumulation_steps", type=int, default=config.default_accumulation_steps, help="梯度累积步数")
-    parser.add_argument("--no_amp", action="store_true", help="禁用混合精度")
-    parser.add_argument("--log_interval", type=int, default=10, help="每 N 个 batch 打印一次进度")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument("--learning_rate", type=float, default=5e-4, help="学习率")
+    parser.add_argument("--accumulation_steps", type=int, default=8, help="梯度累积步数")
     parser.add_argument("--save_step", type=int, default=1000, help="每 N 个 step 保存一次 checkpoint")
-    parser.add_argument("--from_checkpoint", type=str, default=f"{config.default_checkpoints_dir}/diy_checkpoint.pth", help="从预训练 checkpoint 加载模型（必需，默认指向预训练结果）")
+    parser.add_argument("--log_interval", type=int, default=10, help="每 N 个 batch 打印一次进度")
+    parser.add_argument("--no_amp", action="store_true", help="禁用混合精度训练")
+    parser.add_argument("--log_level", type=str, default="INFO", help="日志级别")
+    parser.add_argument("--log_file", type=str, default=None, help="日志文件路径（可选）")
+    
     args = parser.parse_args()
+    
+    # 设置 logger（自动在 logs/ 目录下创建日志文件）
+    setup_logger(
+        name="llm_lab.sft",
+        level=args.log_level,
+        log_file=Path(args.log_file) if args.log_file else None,
+        auto_log_file=args.log_file is None,  # 如果未指定 log_file，则自动创建
+    )
+    logger = get_logger("llm_lab.sft")
+    
+    # 创建配置（从命令行参数）
+    config = TritonMindConfig(
+        vocab_size=args.vocab_size,
+        hidden_size=args.hidden_size,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        num_key_value_heads=args.num_key_value_heads,
+        max_seq_len=args.max_seq_len,
+        dropout=args.dropout,
+        eps=args.eps,
+        rope_base=args.rope_base,
+        train_max_length=args.train_max_length,
+    )
+    
     device = config.device
-    batch_size = args.batch_size
-    accumulation_steps = args.accumulation_steps
-    learning_rate = args.learning_rate
-    logger.info(f"Using device: {device}")
-
+    logger.info(f"使用设备: {device}")
+    logger.info(f"模型配置: hidden_size={config.hidden_size}, num_layers={config.num_layers}, "
+                f"num_heads={config.num_heads}, vocab_size={config.vocab_size}")
+    
     # 检查数据文件
     data_path = Path(args.data_path)
     if not data_path.exists():
         logger.error(f"数据文件不存在: {data_path}")
         raise FileNotFoundError(f"数据文件不存在: {data_path}")
-
-    use_amp = torch.cuda.is_available() and not args.no_amp
-    scaler = GradScaler() if use_amp else None
-    torch.manual_seed(42)
     
+    # 检查 checkpoint
     checkpoint_path = Path(args.from_checkpoint)
     if not checkpoint_path.exists():
         logger.error(f"预训练 checkpoint 不存在: {checkpoint_path}")
-        logger.error(f"SFT 训练必须从预训练结果加载模型，请先运行预训练或指定正确的 checkpoint 路径")
+        logger.error("SFT 训练必须从预训练结果加载模型，请先运行预训练或指定正确的 checkpoint 路径")
         raise FileNotFoundError(f"预训练 checkpoint 不存在: {checkpoint_path}")
     
     logger.info(f"从预训练 checkpoint 加载模型: {checkpoint_path}")
@@ -58,38 +94,46 @@ def main():
     model = TritonMindForCausalLM(config)
     model.load_state_dict(checkpoint["state_dict"], strict=False)
     model = model.to(device)
-    logger.info(f"模型加载完成")
+    logger.info("模型加载完成")
     
     # 打印模型参数量
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"模型总参数量: {total_params / 1e6:.2f}M | 可训练参数: {trainable_params / 1e6:.2f}M")
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-
+    # 设置优化器
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    
+    # 准备数据
     tokenizer = AutoTokenizer.from_pretrained(str(TOKENIZER_DIR))
     dataset = SimpleSFTDataset(args.data_path, tokenizer, max_length=config.train_max_length)
-    loader = DataLoader(dataset, batch_size=batch_size, num_workers=2, shuffle=True)
+    loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=2, shuffle=True)
     
     num_samples = len(dataset)
     batches_per_epoch = len(loader)
     num_training_steps = batches_per_epoch * args.epochs
-    logger.info(f"样本数 {num_samples} | batch_size {batch_size} | epochs {args.epochs} | 每轮 {batches_per_epoch} batches | 总步数 {num_training_steps}")
-
+    logger.info(f"样本数: {num_samples} | batch_size: {args.batch_size} | epochs: {args.epochs} | "
+                f"每轮 batches: {batches_per_epoch} | 总步数: {num_training_steps}")
+    
+    # 训练设置
+    use_amp = torch.cuda.is_available() and not args.no_amp
+    scaler = GradScaler() if use_amp else None
+    torch.manual_seed(42)
+    
     Path(args.checkpoints_dir).mkdir(parents=True, exist_ok=True)
     model.train()
-
+    
     step = 0
     for epoch in range(args.epochs):
         logger.info(f"Epoch {epoch + 1}/{args.epochs}")
         epoch_start_time = time.time()
-
+        
         for batch_ids, batch in enumerate(loader):
             input_ids, labels, loss_mask = batch
             input_ids = input_ids.to(device)
             labels = labels.to(device)
             loss_mask = loss_mask.to(device)
-
+            
             if use_amp:
                 with autocast():
                     logits = model(input_ids)
@@ -98,8 +142,8 @@ def main():
                     mask_slice = loss_mask[:, 1:].reshape(-1)
                     loss = F.cross_entropy(logits_slice, labels_slice, reduction='none')
                     loss = (loss * mask_slice).sum() / mask_slice.sum().clamp(min=1.0)
-
-                loss = loss / accumulation_steps
+                
+                loss = loss / args.accumulation_steps
                 scaler.scale(loss).backward()
             else:
                 logits = model(input_ids)
@@ -108,11 +152,11 @@ def main():
                 mask_slice = loss_mask[:, 1:].reshape(-1)
                 loss = F.cross_entropy(logits_slice, labels_slice, reduction='none')
                 loss = (loss * mask_slice).sum() / mask_slice.sum().clamp(min=1.0)
-
-                loss = loss / accumulation_steps
+                
+                loss = loss / args.accumulation_steps
                 loss.backward()
-
-            if (batch_ids + 1) % accumulation_steps == 0:
+            
+            if (batch_ids + 1) % args.accumulation_steps == 0:
                 if use_amp:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -123,29 +167,34 @@ def main():
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
-
+                
                 if step % args.save_step == 0:
                     checkpoint = {
                         "config": config.__dict__,
                         "state_dict": model.state_dict(),
                     }
-                    checkpoint_path = f"{args.checkpoints_dir}/diy_checkpoint_sft_step{step}.pth"
+                    checkpoint_path = f"{args.checkpoints_dir}/TritonMind_sft_step{step}.pth"
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Checkpoint saved: {checkpoint_path}")
-
+            
             # 每 log_interval 个 batch 打印一次进度，或每个 epoch 的第一个 batch
             current_batch_in_epoch = batch_ids + 1
             if current_batch_in_epoch % args.log_interval == 0 or current_batch_in_epoch == 1:
-                current_loss = loss.item() * accumulation_steps
+                current_loss = loss.item() * args.accumulation_steps
                 spend_time = time.time() - epoch_start_time
                 eta_min = spend_time / current_batch_in_epoch * batches_per_epoch // 60 - spend_time // 60
-                logger.info(f"step {step} (epoch {epoch+1}, batch {current_batch_in_epoch}/{batches_per_epoch}) | loss = {current_loss:.6f} | lr = {learning_rate:.2e} | epoch_Time: {eta_min}min")
-
+                logger.info(
+                    f"step {step} (epoch {epoch+1}, batch {current_batch_in_epoch}/{batches_per_epoch}) | "
+                    f"loss = {current_loss:.6f} | lr = {args.learning_rate:.2e} | "
+                    f"epoch_Time: {eta_min}min"
+                )
+    
+    # 保存最终 checkpoint
     checkpoint = {
         "config": config.__dict__,
         "state_dict": model.state_dict(),
     }
-    checkpoint_path = f"{args.checkpoints_dir}/diy_checkpoint_sft_final.pth"
+    checkpoint_path = f"{args.checkpoints_dir}/TritonMind_sft_final.pth"
     torch.save(checkpoint, checkpoint_path)
     logger.info(f"训练完成，最终 checkpoint 已保存到 {checkpoint_path}")
 

@@ -154,5 +154,8 @@ cython_debug/
 *.tmp
 *.bak
 
+# Logs directory
+logs/
+
 checkpoints/
 dataset/

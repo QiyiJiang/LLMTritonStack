@@ -26,11 +26,3 @@ class RMSNorm(nn.Module):
             Normalized tensor，shape (..., hidden_size)
         """
         return self.weight * self._norm(x)
-
-
-if __name__ == "__main__":
-    config = TritonMindConfig()
-    rmsnorm = RMSNorm(config)
-    x = torch.rand([1, 2, config.hidden_size])
-    print(x.shape)
-    print(rmsnorm(x).shape)
