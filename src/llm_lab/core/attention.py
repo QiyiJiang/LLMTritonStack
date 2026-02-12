@@ -43,12 +43,7 @@ class BaseAttention(nn.Module):
 
         return torch.matmul(att, v)
 
-"""
-MaskedAttention 主要解决自回归建模中信息泄露的问题
-1. causal mask 防止看到未来
-2. padding mask 防止模型关注无意义的 padding token
-3. combined mask 混合 mask
-"""
+
 class MaskedAttention(nn.Module):
     def __init__(self, hidden_size: int):
         super().__init__()
@@ -85,9 +80,7 @@ class MaskedAttention(nn.Module):
         return torch.matmul(att, v)
 
 
-"""
-把 hidden space 切成多个子空间，每个子空间独立做 attention
-"""
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, hidden_size: int, num_heads: int):
         super().__init__()
@@ -193,19 +186,7 @@ class PaddingMaskedAttention(nn.Module):
         return att
 
 
-"""
-在训练阶段：
-输入整个序列 x = [x1, x2, ..., xL]
-Multi-head attention 会同时计算每个 query 对所有 key 的 attention
-这是 全序列计算，复杂度 O(L²)
 
-在推理阶段（GPT 自回归生成）：
-已生成序列 [x1, x2, ..., xt-1]
-下一步只生成 xt
-如果每次都重新计算 QKVT 对应整个历史序列，会浪费大量计算
-
-✅ 解决方案 → KV Cache（Key/Value 缓存机制）
-"""
 class MultiHeadAttentionWithKVCache(nn.Module):
     def __init__(self, hidden_size: int, num_heads: int):
         super().__init__()
@@ -270,30 +251,6 @@ class MultiHeadAttentionWithKVCache(nn.Module):
         return att, cached_k, cached_v
 
 
-"""
-Attention 不是慢在算力而是慢在：内存访问和数值稳定处理
-Softmax 是 attention 中最容易拖慢 GPU 的步骤
-
-softmax 有三个步骤：(1) 求 man <主要作用是稳定数值，防止指数爆炸> (2) exp (3) sum + normalize
-在 FP16 中 (1) exp对精度及其敏感 (2) sum是大规模reduction (3) mask会引入-inf
-这会导致 梯度为NaN attention全0 loss突然爆炸
-所以工程中 softmax 的关键步骤都是使用 FP32 累加的
-
-FlashAttention 的核心是不把中间结果写回显存
-传统的 attention 会显示的生成 L * L 的 score / softmax 矩阵,计算本身不满,但是显存读写,kernel启动和中间的 Tensor 成为瓶颈。
-FlashAttention 通过按照 按 block 计算 QKᵀ → softmax → *V ,并在寄存器 / shared memory 中完成全部流程,把多个 kernel 融合成一个,从而极大减少显存带宽消耗和 kernel launch 次数。
-Mask(causal / padding)在计算中直接融合,而不是事后用 -inf 修补。性能提升的本质来源是 内存访问模式优化 + kernel fusion,而不是数学公式变化。
-"""
-
-"""
-TODO(P0,必须):
-- 将基于 torch.cat 的 KV cache 改为预分配缓存
-- cached_k / cached_v 形状统一为 [B, num_heads, max_seq_len, head_dim]
-- 引入 cache_pos 指针,在 cache_pos 位置原地写入 k / v
-- 推理模式下强制 seq_len == 1
-- 使用 cache_pos 对历史 k / v 做切片,避免 O(T) 的 concat 操作
-- 实现真正的 O(1) 增量解码推理
-"""
 class IncrementalKVAttention(nn.Module):
     def __init__(self, hidden_size: int, num_heads: int, max_seq_len: int):
         super().__init__()
@@ -369,13 +326,6 @@ class IncrementalKVAttention(nn.Module):
         return att, cached, cached_pos+1
 
 
-"""
-TODO(P1,性能关键):
-- 合并 Q / K / V 为一个线性层:Linear(hidden_size, 3 * hidden_size)
-- 使用 chunk(3, dim=-1) 拆分 fused QKV
-- 删除自定义 _softmax 实现
-- 使用 torch.softmax 或 scaled_dot_product_attention
-"""
 class FusedQKVAttention(nn.Module):
     def __init__(self, hidden_size: int, num_heads: int, max_seq_len: int):
         super().__init__()
@@ -443,13 +393,6 @@ class FusedQKVAttention(nn.Module):
         return att, cached, cached_pos+1
 
 
-"""
-TODO(P2,FlashAttention / AMP 准备):
-- 推理模式下不再构造 causal mask(单 token 天然满足因果性)
-- padding mask 仅在训练模式下使用
-- 确保 attention 相关张量布局为 [B, H, L, D] 且 contiguous
-- 减少不必要的 transpose / permute 操作
-"""
 class FlashAttentionFusedAttention(nn.Module):
     """Fused QKV Attention，支持训练模式和 KV cache 增量解码。"""
     

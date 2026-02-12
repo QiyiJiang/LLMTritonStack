@@ -49,6 +49,7 @@ def _build_loss_mask(input_ids, tokenizer):
 
     return torch.tensor(loss_mask, dtype=torch.long, device=input_ids.device)
 
+
 class SimplePretrainDataset(Dataset):
     def __init__(self, file_path, tokenizer, max_length: Optional[int] = None):
         self.tokenizer = tokenizer
@@ -200,8 +201,6 @@ class SimpleSFTDataset(Dataset):
         labels = input_ids.clone()
         
         return input_ids, labels, loss_mask 
-
-
 
 
 class SFTDataset(IterableDataset):

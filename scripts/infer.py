@@ -1,4 +1,3 @@
-"""推理示例：使用 KV cache 进行增量生成。"""
 import argparse
 import torch
 from pathlib import Path

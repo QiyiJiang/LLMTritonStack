@@ -1,4 +1,3 @@
-"""SFT 训练脚本：接受命令行参数，创建配置并训练模型。"""
 import argparse
 import time
 import torch
